@@ -20,11 +20,6 @@ class TradingStrategy(Strategy):
         self.active_positions = []
         self.total_allocation = 0
         self.last_processed_date = None
-        
-        # Price tracking for time-based comparison
-        self.open_price = None
-        self.prev_hour_price = None
-        self.day_start = False
 
     @property
     def interval(self):
@@ -38,15 +33,12 @@ class TradingStrategy(Strategy):
     def data(self):
         return self.data_list
 
-    def determine_trend(self, current_price):
-        """Determine trend based on price comparison of 9:30 vs 10:30"""
-        if self.open_price is None or self.prev_hour_price is None:
-            return None
-            
-        log(f"Comparing prices - Open(9:30): {self.open_price}, Previous(10:30): {self.prev_hour_price}")
-        if self.prev_hour_price > self.open_price:
+    def determine_trend(self, open_price, close_price):
+        """Determine trend using price action"""
+        log(f"Comparing prices - Open: {open_price}, Close: {close_price}")
+        if close_price > open_price:
             return "bullish"
-        elif self.prev_hour_price < self.open_price:
+        elif close_price < open_price:
             return "bearish"
         return None
 
@@ -59,9 +51,9 @@ class TradingStrategy(Strategy):
             adjustment = price_diff * self.tp_adjustment_percent
             
             if self.active_positions[0]['type'] == 'bullish':
-                new_tp = last_position + adjustment
+                new_tp = first_position + adjustment
             else:
-                new_tp = last_position - adjustment
+                new_tp = first_position - adjustment
             
             log(f"Adjusting TPs for all positions to {new_tp}")
             for position in self.active_positions:
@@ -122,8 +114,6 @@ class TradingStrategy(Strategy):
         current_data = ohlcv[-1]
         ticker_data = current_data[self.tickers[0]]
         current_date = datetime.strptime(ticker_data['date'], '%Y-%m-%d %H:%M:%S')
-        current_hour = current_date.hour
-        current_minute = current_date.minute
         self.current_price = ticker_data['close']
 
         if current_date == self.last_processed_date:
@@ -131,47 +121,11 @@ class TradingStrategy(Strategy):
 
         log(f"\n=== Processing {current_date} ===")
         
-        # Store 9:30 price
-        if current_hour == 9 and current_minute == 30:
-            self.open_price = self.current_price
-            self.day_start = True
-            log(f"Stored 9:30 price: {self.open_price}")
-            return TargetAllocation({self.tickers[0]: self.total_allocation})
+        # Determine trend and manage positions
+        trend = self.determine_trend(ticker_data['open'], ticker_data['close'])
+        if trend:
+            log(f"Current trend: {trend}")
             
-        # Store 10:30 price and determine trend
-        if current_hour == 10 and current_minute == 30:
-            self.prev_hour_price = self.current_price
-            log(f"Stored 10:30 price: {self.prev_hour_price}")
-            if self.day_start:
-                trend = self.determine_trend(self.current_price)
-                if trend and len(self.active_positions) < self.max_positions:
-                    # Calculate take profit and stop loss
-                    if trend == "bullish":
-                        take_profit = self.current_price + self.fixed_tp_distance
-                        stop_loss = self.current_price - self.fixed_sl_distance
-                    else:
-                        take_profit = self.current_price - self.fixed_tp_distance
-                        stop_loss = self.current_price + self.fixed_sl_distance
-                    
-                    # Open first position
-                    position = {
-                        'price': self.current_price,
-                        'allocation': self.fixed_lot_size,
-                        'type': trend,
-                        'take_profit': take_profit,
-                        'stop_loss': stop_loss
-                    }
-                    
-                    self.active_positions.append(position)
-                    self.total_allocation += self.fixed_lot_size
-                    log(f"First position opened: {position}")
-        
-        # Reset day start flag at end of day
-        if current_hour == 15 and current_minute == 30:
-            self.day_start = False
-            
-        # Manage existing positions and check for new grid positions
-        if self.active_positions:
             # Manage existing positions
             allocation_change = self.manage_existing_positions(
                 self.current_price,
@@ -180,16 +134,16 @@ class TradingStrategy(Strategy):
             )
             self.total_allocation += allocation_change
             
-            # Check for new position based on grid
-            trend = self.active_positions[0]['type']  # Use trend from first position
+            # Check for new position
             if len(self.active_positions) < self.max_positions:
                 if self.should_open_new_position(self.current_price, trend):
+                    # Calculate take profit and stop loss
                     if trend == "bullish":
                         take_profit = self.current_price + self.fixed_tp_distance
-                        stop_loss = self.active_positions[0]['stop_loss']  # Use first position's stop loss
+                        stop_loss = self.current_price - self.fixed_sl_distance
                     else:
                         take_profit = self.current_price - self.fixed_tp_distance
-                        stop_loss = self.active_positions[0]['stop_loss']  # Use first position's stop loss
+                        stop_loss = self.current_price + self.fixed_sl_distance
                     
                     position = {
                         'price': self.current_price,
@@ -201,7 +155,7 @@ class TradingStrategy(Strategy):
                     
                     self.active_positions.append(position)
                     self.total_allocation += self.fixed_lot_size
-                    log(f"Additional position opened: {position}")
+                    log(f"New position opened: {position}")
                     
                     # Adjust take profits if necessary
                     self.adjust_take_profits()

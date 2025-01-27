@@ -1,6 +1,6 @@
 from surmount.base_class import Strategy, TargetAllocation
 from surmount.logging import log
-from surmount.technical_indicators import RSI, ATR, SMA
+from surmount.technical_indicators import RSI, ATR
 
 class TradingStrategy(Strategy):
     def __init__(self):
@@ -10,6 +10,7 @@ class TradingStrategy(Strategy):
         # Strategy parameters
         self.max_positions = 17
         self.base_allocation = 0.1
+        self.increased_allocation = 0.15
         self.adjustment_threshold = 6
         self.tp_adjustment_percent = 0.70
         
@@ -17,6 +18,7 @@ class TradingStrategy(Strategy):
         self.active_positions = []
         self.total_allocation = 0
         self.last_processed_date = None
+        self.winning_trades = 0
         
         # Technical parameters
         self.rsi_period = 14
@@ -34,6 +36,16 @@ class TradingStrategy(Strategy):
     @property
     def data(self):
         return self.data_list
+
+    def get_position_allocation(self, trend):
+        """Determine position allocation based on consecutive winning trades"""
+        if len(self.active_positions) > 0 and all(p['type'] == trend for p in self.active_positions[-3:]):
+            allocation = self.increased_allocation
+            log(f"Using increased allocation {allocation} due to consecutive trend positions")
+        else:
+            allocation = self.base_allocation
+            log(f"Using base allocation {allocation}")
+        return allocation
 
     def calculate_average_volume(self, ohlcv, period):
         """Calculate average volume manually"""
@@ -76,18 +88,11 @@ class TradingStrategy(Strategy):
                 
             # Dynamic stop loss based on ATR
             sl_distance = current_atr * 3
-            
-            # Dynamic position sizing based on volume
-            if ticker_data['volume'] > avg_volume * 1.2:
-                allocation = self.base_allocation * 1.5
-            else:
-                allocation = self.base_allocation
                 
             params = {
                 'grid_step': grid_step,
                 'tp_distance': tp_distance,
                 'sl_distance': sl_distance,
-                'allocation': allocation,
                 'rsi': current_rsi,
                 'atr': current_atr,
                 'avg_volume': avg_volume
@@ -128,20 +133,24 @@ class TradingStrategy(Strategy):
                 log(f"TP hit for bullish position {idx} at {pos['take_profit']}")
                 positions_to_remove.append(pos)
                 allocation_change -= pos['allocation']
+                self.winning_trades += 1
             elif pos['type'] == 'bearish' and low_price <= pos['take_profit']:
                 log(f"TP hit for bearish position {idx} at {pos['take_profit']}")
                 positions_to_remove.append(pos)
                 allocation_change -= pos['allocation']
+                self.winning_trades += 1
                 
             # Check stop losses
             elif pos['type'] == 'bullish' and low_price <= pos['stop_loss']:
                 log(f"SL hit for bullish position {idx} at {pos['stop_loss']}")
                 positions_to_remove.append(pos)
                 allocation_change -= pos['allocation']
+                self.winning_trades = 0  # Reset consecutive wins on loss
             elif pos['type'] == 'bearish' and high_price >= pos['stop_loss']:
                 log(f"SL hit for bearish position {idx} at {pos['stop_loss']}")
                 positions_to_remove.append(pos)
                 allocation_change -= pos['allocation']
+                self.winning_trades = 0  # Reset consecutive wins on loss
         
         for pos in positions_to_remove:
             self.active_positions.remove(pos)
@@ -164,6 +173,7 @@ class TradingStrategy(Strategy):
 
         log(f"\n=== Processing {current_date} ===")
         log(f"Current positions: {len(self.active_positions)}")
+        log(f"Consecutive winning trades: {self.winning_trades}")
         
         # Calculate dynamic parameters
         params = self.calculate_dynamic_parameters(ticker_data, ohlcv)
@@ -192,9 +202,12 @@ class TradingStrategy(Strategy):
                     should_open = ticker_data['close'] > last_pos['price'] + params['grid_step']
             
             if should_open:
+                # Get position allocation based on consecutive wins
+                allocation = self.get_position_allocation(trend)
+                
                 position = {
                     'price': ticker_data['close'],
-                    'allocation': params['allocation'],
+                    'allocation': allocation,
                     'type': trend,
                     'take_profit': ticker_data['close'] + params['tp_distance'] if trend == "bullish" 
                                  else ticker_data['close'] - params['tp_distance'],
@@ -203,7 +216,7 @@ class TradingStrategy(Strategy):
                 }
                 
                 self.active_positions.append(position)
-                self.total_allocation += params['allocation']
+                self.total_allocation += allocation
                 log(f"New position opened: {position}")
         
         self.last_processed_date = current_date

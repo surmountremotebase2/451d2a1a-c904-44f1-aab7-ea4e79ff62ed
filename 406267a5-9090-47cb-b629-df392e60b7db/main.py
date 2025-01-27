@@ -9,7 +9,7 @@ class TradingStrategy(Strategy):
         
         # Strategy parameters
         self.max_positions = 17
-        self.base_allocation = 0.01
+        self.base_allocation = 0.1
         self.adjustment_threshold = 6
         self.tp_adjustment_percent = 0.70
         

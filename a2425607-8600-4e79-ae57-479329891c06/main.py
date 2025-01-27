@@ -4,24 +4,35 @@ from surmount.technical_indicators import RSI, ATR, SMA
 
 class TradingStrategy(Strategy):
     def __init__(self):
-        self.tickers = ["PPLT"]
+        self.tickers = ["GLD"]
         self.data_list = []
+        
+        # Core technical parameters - optimized for GLD
+        self.rsi_period = 12        # Slightly faster RSI
+        self.atr_period = 10        # More responsive ATR
+        self.vol_period = 15        # More recent volume focus
+        self.sma_period = 20        # Trend confirmation
         
         # Strategy parameters
         self.max_positions = 17
+        self.max_positions_per_direction = 10  # New: limit positions per direction
         self.base_allocation = 1
+        self.max_allocation = 2      # New: cap on position size
         self.adjustment_threshold = 6
         self.tp_adjustment_percent = 0.70
+        
+        # Dynamic multipliers - optimized
+        self.grid_multiplier = 0.4   # Slightly tighter grid
+        self.tp_multiplier_normal = 0.9
+        self.tp_multiplier_overbought = 0.6
+        self.tp_multiplier_oversold = 1.3
+        self.sl_multiplier = 2.5     # Slightly tighter stop loss
+        self.volume_multiplier = 1.3  # More conservative volume scaling
         
         # Position tracking
         self.active_positions = []
         self.total_allocation = 0
         self.last_processed_date = None
-        
-        # Technical parameters
-        self.rsi_period = 14
-        self.atr_period = 14
-        self.vol_period = 20
 
     @property
     def interval(self):
@@ -52,34 +63,36 @@ class TradingStrategy(Strategy):
             # Get technical indicators
             rsi = RSI(self.tickers[0], ohlcv, self.rsi_period)
             atr = ATR(self.tickers[0], ohlcv, self.atr_period)
+            sma = SMA(self.tickers[0], ohlcv, self.sma_period)
             avg_volume = self.calculate_average_volume(ohlcv, self.vol_period)
             
-            if not all([rsi, atr, avg_volume]):
+            if not all([rsi, atr, avg_volume, sma]):
                 log("Technical indicators not ready")
                 return None
                 
             current_rsi = rsi[-1]
             current_atr = atr[-1]
+            current_sma = sma[-1]
             
-            log(f"Indicators - RSI: {current_rsi}, ATR: {current_atr}, Avg Vol: {avg_volume}")
+            log(f"Indicators - RSI: {current_rsi}, ATR: {current_atr}, SMA: {current_sma}, Avg Vol: {avg_volume}")
             
             # Dynamic grid spacing based on ATR
-            grid_step = current_atr * 0.5
+            grid_step = current_atr * self.grid_multiplier
             
             # Dynamic take profit based on RSI
             if current_rsi > 70:
-                tp_distance = current_atr * 0.5  # Tighter TP in overbought
+                tp_distance = current_atr * self.tp_multiplier_overbought
             elif current_rsi < 30:
-                tp_distance = current_atr * 1.2  # Wider TP in oversold
+                tp_distance = current_atr * self.tp_multiplier_oversold
             else:
-                tp_distance = current_atr * 0.8
+                tp_distance = current_atr * self.tp_multiplier_normal
                 
             # Dynamic stop loss based on ATR
-            sl_distance = current_atr * 3
+            sl_distance = current_atr * self.sl_multiplier
             
-            # Dynamic position sizing based on volume
+            # Dynamic position sizing based on volume with cap
             if ticker_data['volume'] > avg_volume * 1.2:
-                allocation = self.base_allocation * 1.5
+                allocation = min(self.base_allocation * self.volume_multiplier, self.max_allocation)
             else:
                 allocation = self.base_allocation
                 
@@ -90,6 +103,7 @@ class TradingStrategy(Strategy):
                 'allocation': allocation,
                 'rsi': current_rsi,
                 'atr': current_atr,
+                'sma': current_sma,
                 'avg_volume': avg_volume
             }
             
@@ -100,19 +114,27 @@ class TradingStrategy(Strategy):
             log(f"Error calculating parameters: {str(e)}")
             return None
 
-    def determine_trend(self, open_price, close_price, rsi):
-        """Determine trend using price action and RSI"""
+    def count_positions_by_type(self, position_type):
+        """Count number of positions of a given type"""
+        return sum(1 for pos in self.active_positions if pos['type'] == position_type)
+
+    def determine_trend(self, open_price, close_price, rsi, current_sma):
+        """Determine trend using price action, RSI, and SMA"""
         price_trend = "bullish" if close_price > open_price else "bearish"
         
-        # Consider RSI for trend confirmation
-        if price_trend == "bullish" and rsi < 70:  # Not overbought
-            trend_strength = "confirmed"
-        elif price_trend == "bearish" and rsi > 30:  # Not oversold
-            trend_strength = "confirmed"
+        # Consider RSI and SMA for trend confirmation
+        if price_trend == "bullish":
+            if rsi < 70 and close_price > current_sma:  # Not overbought and above SMA
+                trend_strength = "confirmed"
+            else:
+                trend_strength = "weak"
         else:
-            trend_strength = "weak"
+            if rsi > 30 and close_price < current_sma:  # Not oversold and below SMA
+                trend_strength = "confirmed"
+            else:
+                trend_strength = "weak"
             
-        log(f"Trend calculation - Open: {open_price}, Close: {close_price}, RSI: {rsi}")
+        log(f"Trend calculation - Open: {open_price}, Close: {close_price}, RSI: {rsi}, SMA: {current_sma}")
         log(f"Trend: {price_trend}, Strength: {trend_strength}")
         
         return price_trend if trend_strength == "confirmed" else None
@@ -151,7 +173,7 @@ class TradingStrategy(Strategy):
     def run(self, data):
         ohlcv = data.get("ohlcv")
         
-        if not ohlcv or len(ohlcv) < max(self.rsi_period, self.atr_period, self.vol_period):
+        if not ohlcv or len(ohlcv) < max(self.rsi_period, self.atr_period, self.vol_period, self.sma_period):
             log("Insufficient data")
             return TargetAllocation({self.tickers[0]: self.total_allocation})
 
@@ -179,9 +201,16 @@ class TradingStrategy(Strategy):
         self.total_allocation += allocation_change
         
         # Determine trend
-        trend = self.determine_trend(ticker_data['open'], ticker_data['close'], params['rsi'])
+        trend = self.determine_trend(ticker_data['open'], ticker_data['close'], 
+                                   params['rsi'], params['sma'])
         
         if trend and len(self.active_positions) < self.max_positions:
+            # Check position limits per direction
+            current_direction_positions = self.count_positions_by_type(trend)
+            if current_direction_positions >= self.max_positions_per_direction:
+                log(f"Maximum positions ({self.max_positions_per_direction}) reached for {trend} direction")
+                return TargetAllocation({self.tickers[0]: self.total_allocation})
+            
             # Check grid spacing
             should_open = True
             if self.active_positions:

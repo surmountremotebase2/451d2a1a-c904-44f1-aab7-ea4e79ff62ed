@@ -9,7 +9,7 @@ class TradingStrategy(Strategy):
         
         # Fixed strategy parameters
         self.max_positions = 17
-        self.fixed_lot_size = 0.01
+        self.fixed_lot_size = 0.1
         self.fixed_tp_distance = 0.8
         self.fixed_sl_distance = 20.0
         self.grid_spacing = 1.0

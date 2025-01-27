@@ -7,12 +7,12 @@ class TradingStrategy(Strategy):
         self.tickers = ["GLD"]
         self.data_list = []
         
-        # Core technical parameters - keeping optimized values
+        # Core technical parameters
         self.rsi_period = 12
         self.atr_period = 10
         self.vol_period = 15
         self.sma_period = 20
-        self.short_sma_period = 10  # New: shorter SMA for cross signals
+        self.short_sma_period = 10
         
         # Strategy parameters
         self.max_positions = 17
@@ -22,13 +22,13 @@ class TradingStrategy(Strategy):
         self.adjustment_threshold = 6
         self.tp_adjustment_percent = 0.70
         
-        # Risk management parameters - New
-        self.max_daily_positions = 3  # Maximum new positions per day
+        # Risk management parameters
+        self.max_daily_positions = 3
         self.daily_positions_opened = 0
         self.last_trading_day = None
-        self.max_total_risk = 0.05    # 5% maximum portfolio risk
+        self.max_total_risk = 0.05
         
-        # Dynamic multipliers - keeping optimized values
+        # Dynamic multipliers
         self.grid_multiplier = 0.4
         self.tp_multiplier_normal = 0.9
         self.tp_multiplier_overbought = 0.6
@@ -41,6 +41,32 @@ class TradingStrategy(Strategy):
         self.total_allocation = 0
         self.last_processed_date = None
         self.total_risk = 0
+
+    @property
+    def interval(self):
+        """Return the data interval for the strategy"""
+        return "1day"
+
+    @property
+    def assets(self):
+        """Return the list of assets used by the strategy"""
+        return self.tickers
+
+    @property
+    def data(self):
+        """Return the data list used by the strategy"""
+        return self.data_list
+
+    def calculate_average_volume(self, ohlcv, period):
+        """Calculate average volume manually"""
+        if len(ohlcv) < period:
+            return None
+        
+        volumes = []
+        for data in ohlcv[-period:]:
+            volumes.append(data[self.tickers[0]]['volume'])
+        
+        return sum(volumes) / len(volumes)
 
     def calculate_position_risk(self, entry_price, stop_loss, allocation):
         """Calculate risk for a single position"""
@@ -67,7 +93,12 @@ class TradingStrategy(Strategy):
 
         return True
 
+    def count_positions_by_type(self, position_type):
+        """Count number of positions of a given type"""
+        return sum(1 for pos in self.active_positions if pos['type'] == position_type)
+
     def calculate_dynamic_parameters(self, ticker_data, ohlcv):
+        """Calculate dynamic strategy parameters based on market conditions"""
         try:
             # Get technical indicators
             rsi = RSI(self.tickers[0], ohlcv, self.rsi_period)
@@ -161,7 +192,39 @@ class TradingStrategy(Strategy):
         
         return price_trend if trend_strength == "confirmed" else None
 
+    def manage_existing_positions(self, current_price, high_price, low_price):
+        """Check take profits and stop losses"""
+        positions_to_remove = []
+        allocation_change = 0
+        
+        for idx, pos in enumerate(self.active_positions):
+            # Check take profits
+            if pos['type'] == 'bullish' and high_price >= pos['take_profit']:
+                log(f"TP hit for bullish position {idx} at {pos['take_profit']}")
+                positions_to_remove.append(pos)
+                allocation_change -= pos['allocation']
+            elif pos['type'] == 'bearish' and low_price <= pos['take_profit']:
+                log(f"TP hit for bearish position {idx} at {pos['take_profit']}")
+                positions_to_remove.append(pos)
+                allocation_change -= pos['allocation']
+                
+            # Check stop losses
+            elif pos['type'] == 'bullish' and low_price <= pos['stop_loss']:
+                log(f"SL hit for bullish position {idx} at {pos['stop_loss']}")
+                positions_to_remove.append(pos)
+                allocation_change -= pos['allocation']
+            elif pos['type'] == 'bearish' and high_price >= pos['stop_loss']:
+                log(f"SL hit for bearish position {idx} at {pos['stop_loss']}")
+                positions_to_remove.append(pos)
+                allocation_change -= pos['allocation']
+        
+        for pos in positions_to_remove:
+            self.active_positions.remove(pos)
+        
+        return allocation_change
+
     def run(self, data):
+        """Main strategy execution method"""
         ohlcv = data.get("ohlcv")
         required_periods = max(self.rsi_period, self.atr_period, self.vol_period, 
                              self.sma_period, self.short_sma_period)

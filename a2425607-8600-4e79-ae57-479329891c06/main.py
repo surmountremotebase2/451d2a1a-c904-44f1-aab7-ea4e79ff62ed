@@ -114,7 +114,11 @@ class TradingStrategy(Strategy):
 
         current_data = ohlcv[-1]
         ticker_data = current_data[self.tickers[0]]
-        current_date = datetime.fromtimestamp(ticker_data['date'])
+        try:
+            current_date = datetime.strptime(ticker_data['date'], '%Y-%m-%d %H:%M:%S')
+        except ValueError as e:
+            log(f"Error parsing date {ticker_data['date']}: {e}")
+            return TargetAllocation({self.tickers[0]: self.total_allocation})
         current_hour = current_date.hour
         self.current_price = ticker_data['close']
 

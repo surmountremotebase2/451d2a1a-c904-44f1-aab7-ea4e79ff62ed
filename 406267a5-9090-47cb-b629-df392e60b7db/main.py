@@ -17,6 +17,7 @@ class TradingStrategy(Strategy):
         
         # Position tracking
         self.active_positions = []
+        self.total_allocation = 0
         self.last_processed_date = None
 
     @property
@@ -37,30 +38,37 @@ class TradingStrategy(Strategy):
         log(f"Trend calculation - Open: {open_price}, Close: {close_price}, Trend: {trend}")
         return trend
 
-    def calculate_position_allocation(self, current_price, trend):
-        """Calculate position allocation based on strategy rules"""
-        if len(self.active_positions) >= self.max_positions:
-            log("Maximum positions reached")
-            return 0
-
-        # Record new position
-        position = {
-            'price': current_price,
-            'allocation': self.initial_allocation,
-            'type': trend,
-            'take_profit': current_price + self.tp_distance if trend == "bullish" else current_price - self.tp_distance,
-            'stop_loss': current_price - self.sl_distance if trend == "bullish" else current_price + self.sl_distance
-        }
+    def manage_existing_positions(self, current_price, high_price, low_price):
+        """Check take profits and stop losses for existing positions"""
+        positions_to_remove = []
+        allocation_change = 0
         
-        self.active_positions.append(position)
-        log(f"New position opened: {position}")
+        for idx, pos in enumerate(self.active_positions):
+            # Check if take profit was hit
+            if pos['type'] == 'bullish' and high_price >= pos['take_profit']:
+                log(f"Take profit hit for bullish position {idx} at {pos['take_profit']}")
+                positions_to_remove.append(pos)
+                allocation_change -= pos['allocation']
+            elif pos['type'] == 'bearish' and low_price <= pos['take_profit']:
+                log(f"Take profit hit for bearish position {idx} at {pos['take_profit']}")
+                positions_to_remove.append(pos)
+                allocation_change -= pos['allocation']
+                
+            # Check if stop loss was hit
+            elif pos['type'] == 'bullish' and low_price <= pos['stop_loss']:
+                log(f"Stop loss hit for bullish position {idx} at {pos['stop_loss']}")
+                positions_to_remove.append(pos)
+                allocation_change -= pos['allocation']
+            elif pos['type'] == 'bearish' and high_price >= pos['stop_loss']:
+                log(f"Stop loss hit for bearish position {idx} at {pos['stop_loss']}")
+                positions_to_remove.append(pos)
+                allocation_change -= pos['allocation']
         
-        # Adjust take profits if needed
-        if len(self.active_positions) > self.adjustment_threshold:
-            self.adjust_take_profits(trend)
-            log("Take profits adjusted")
+        # Remove closed positions
+        for pos in positions_to_remove:
+            self.active_positions.remove(pos)
         
-        return self.initial_allocation
+        return allocation_change
 
     def adjust_take_profits(self, trend):
         """Adjust take profits when more than 6 positions are open"""
@@ -97,13 +105,35 @@ class TradingStrategy(Strategy):
         
         return should_open
 
+    def calculate_position_allocation(self, current_price, trend):
+        """Calculate position allocation based on strategy rules"""
+        if len(self.active_positions) >= self.max_positions:
+            log("Maximum positions reached")
+            return 0
+
+        position = {
+            'price': current_price,
+            'allocation': self.initial_allocation,
+            'type': trend,
+            'take_profit': current_price + self.tp_distance if trend == "bullish" else current_price - self.tp_distance,
+            'stop_loss': current_price - self.sl_distance if trend == "bullish" else current_price + self.sl_distance
+        }
+        
+        self.active_positions.append(position)
+        log(f"New position opened: {position}")
+        
+        if len(self.active_positions) > self.adjustment_threshold:
+            self.adjust_take_profits(trend)
+            log("Take profits adjusted")
+            
+        return self.initial_allocation
+
     def run(self, data):
-        allocation_dict = {ticker: 0 for ticker in self.tickers}
         ohlcv = data.get("ohlcv")
         
         if not ohlcv or len(ohlcv) < 2:
             log("Insufficient data")
-            return TargetAllocation(allocation_dict)
+            return TargetAllocation({self.tickers[0]: self.total_allocation})
 
         current_data = ohlcv[-1]
         ticker_data = current_data[self.tickers[0]]
@@ -111,21 +141,29 @@ class TradingStrategy(Strategy):
         
         if current_date == self.last_processed_date:
             log(f"Already processed date: {current_date}")
-            return TargetAllocation(allocation_dict)
+            return TargetAllocation({self.tickers[0]: self.total_allocation})
 
         log(f"\n=== Processing {current_date} ===")
-        log(f"Open: {ticker_data['open']}, Close: {ticker_data['close']}")
+        log(f"Current positions: {len(self.active_positions)}")
+        log(f"Total allocation: {self.total_allocation}")
         
-        # Determine trend using open and close prices
+        # First check existing positions
+        allocation_change = self.manage_existing_positions(
+            ticker_data['close'],
+            ticker_data['high'],
+            ticker_data['low']
+        )
+        self.total_allocation += allocation_change
+        
+        # Determine trend for new positions
         trend = self.determine_trend(ticker_data['open'], ticker_data['close'])
         
         # Check if we should open a new position
         if self.should_open_new_position(ticker_data['close'], trend):
-            allocation = self.calculate_position_allocation(ticker_data['close'], trend)
-            allocation_dict[self.tickers[0]] = allocation
-            log(f"Opening position with allocation: {allocation}")
+            new_allocation = self.calculate_position_allocation(ticker_data['close'], trend)
+            self.total_allocation += new_allocation
         
         self.last_processed_date = current_date
-        log(f"Final allocation: {allocation_dict}\n")
+        log(f"Final total allocation: {self.total_allocation}\n")
         
-        return TargetAllocation(allocation_dict)
+        return TargetAllocation({self.tickers[0]: self.total_allocation})

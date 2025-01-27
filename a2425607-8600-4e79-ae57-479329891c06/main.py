@@ -7,94 +7,110 @@ class TradingStrategy(Strategy):
         self.tickers = ["GLD"]
         self.data_list = []
         
-        # Core technical parameters - optimized for GLD
-        self.rsi_period = 12        # Slightly faster RSI
-        self.atr_period = 10        # More responsive ATR
-        self.vol_period = 15        # More recent volume focus
-        self.sma_period = 20        # Trend confirmation
+        # Core technical parameters - keeping optimized values
+        self.rsi_period = 12
+        self.atr_period = 10
+        self.vol_period = 15
+        self.sma_period = 20
+        self.short_sma_period = 10  # New: shorter SMA for cross signals
         
         # Strategy parameters
         self.max_positions = 17
-        self.max_positions_per_direction = 10  # New: limit positions per direction
+        self.max_positions_per_direction = 10
         self.base_allocation = 1
-        self.max_allocation = 2      # New: cap on position size
+        self.max_allocation = 2
         self.adjustment_threshold = 6
         self.tp_adjustment_percent = 0.70
         
-        # Dynamic multipliers - optimized
-        self.grid_multiplier = 0.4   # Slightly tighter grid
+        # Risk management parameters - New
+        self.max_daily_positions = 3  # Maximum new positions per day
+        self.daily_positions_opened = 0
+        self.last_trading_day = None
+        self.max_total_risk = 0.05    # 5% maximum portfolio risk
+        
+        # Dynamic multipliers - keeping optimized values
+        self.grid_multiplier = 0.4
         self.tp_multiplier_normal = 0.9
         self.tp_multiplier_overbought = 0.6
         self.tp_multiplier_oversold = 1.3
-        self.sl_multiplier = 2.5     # Slightly tighter stop loss
-        self.volume_multiplier = 1.3  # More conservative volume scaling
+        self.sl_multiplier = 2.5
+        self.volume_multiplier = 1.3
         
         # Position tracking
         self.active_positions = []
         self.total_allocation = 0
         self.last_processed_date = None
+        self.total_risk = 0
 
-    @property
-    def interval(self):
-        return "1day"
+    def calculate_position_risk(self, entry_price, stop_loss, allocation):
+        """Calculate risk for a single position"""
+        risk_amount = abs(entry_price - stop_loss) * allocation
+        return risk_amount / entry_price
 
-    @property
-    def assets(self):
-        return self.tickers
+    def can_add_position(self, current_date, position_risk):
+        """Check if we can add a new position based on risk and daily limits"""
+        # Reset daily counter if new day
+        current_day = current_date.split(' ')[0]
+        if current_day != self.last_trading_day:
+            self.daily_positions_opened = 0
+            self.last_trading_day = current_day
 
-    @property
-    def data(self):
-        return self.data_list
+        # Check daily position limit
+        if self.daily_positions_opened >= self.max_daily_positions:
+            log(f"Daily position limit ({self.max_daily_positions}) reached")
+            return False
 
-    def calculate_average_volume(self, ohlcv, period):
-        """Calculate average volume manually"""
-        if len(ohlcv) < period:
-            return None
-        
-        volumes = []
-        for data in ohlcv[-period:]:
-            volumes.append(data[self.tickers[0]]['volume'])
-        
-        return sum(volumes) / len(volumes)
+        # Check total risk
+        if self.total_risk + position_risk > self.max_total_risk:
+            log(f"Maximum portfolio risk ({self.max_total_risk*100}%) would be exceeded")
+            return False
+
+        return True
 
     def calculate_dynamic_parameters(self, ticker_data, ohlcv):
-        """Calculate dynamic strategy parameters based on market conditions"""
         try:
             # Get technical indicators
             rsi = RSI(self.tickers[0], ohlcv, self.rsi_period)
             atr = ATR(self.tickers[0], ohlcv, self.atr_period)
             sma = SMA(self.tickers[0], ohlcv, self.sma_period)
+            short_sma = SMA(self.tickers[0], ohlcv, self.short_sma_period)
             avg_volume = self.calculate_average_volume(ohlcv, self.vol_period)
             
-            if not all([rsi, atr, avg_volume, sma]):
+            if not all([rsi, atr, avg_volume, sma, short_sma]):
                 log("Technical indicators not ready")
                 return None
                 
             current_rsi = rsi[-1]
             current_atr = atr[-1]
             current_sma = sma[-1]
+            current_short_sma = short_sma[-1]
             
-            log(f"Indicators - RSI: {current_rsi}, ATR: {current_atr}, SMA: {current_sma}, Avg Vol: {avg_volume}")
+            log(f"Indicators - RSI: {current_rsi}, ATR: {current_atr}, SMA: {current_sma}, Short SMA: {current_short_sma}")
             
-            # Dynamic grid spacing based on ATR
-            grid_step = current_atr * self.grid_multiplier
+            # Market volatility adjustment
+            volatility_factor = min(max(current_atr / ticker_data['close'], 0.001), 0.02)
+            adjusted_grid = self.grid_multiplier * (1 + volatility_factor)
             
-            # Dynamic take profit based on RSI
+            # Dynamic parameters with volatility adjustment
+            grid_step = current_atr * adjusted_grid
+            
+            # Dynamic take profit based on RSI and volatility
             if current_rsi > 70:
-                tp_distance = current_atr * self.tp_multiplier_overbought
+                tp_distance = current_atr * self.tp_multiplier_overbought * (1 - volatility_factor)
             elif current_rsi < 30:
-                tp_distance = current_atr * self.tp_multiplier_oversold
+                tp_distance = current_atr * self.tp_multiplier_oversold * (1 + volatility_factor)
             else:
                 tp_distance = current_atr * self.tp_multiplier_normal
                 
-            # Dynamic stop loss based on ATR
-            sl_distance = current_atr * self.sl_multiplier
+            # Dynamic stop loss based on ATR and volatility
+            sl_distance = current_atr * self.sl_multiplier * (1 + volatility_factor)
             
-            # Dynamic position sizing based on volume with cap
+            # Dynamic position sizing based on volume with volatility adjustment
             if ticker_data['volume'] > avg_volume * 1.2:
-                allocation = min(self.base_allocation * self.volume_multiplier, self.max_allocation)
+                allocation = min(self.base_allocation * self.volume_multiplier * (1 - volatility_factor), 
+                               self.max_allocation)
             else:
-                allocation = self.base_allocation
+                allocation = self.base_allocation * (1 - volatility_factor)
                 
             params = {
                 'grid_step': grid_step,
@@ -104,6 +120,8 @@ class TradingStrategy(Strategy):
                 'rsi': current_rsi,
                 'atr': current_atr,
                 'sma': current_sma,
+                'short_sma': current_short_sma,
+                'volatility': volatility_factor,
                 'avg_volume': avg_volume
             }
             
@@ -114,66 +132,41 @@ class TradingStrategy(Strategy):
             log(f"Error calculating parameters: {str(e)}")
             return None
 
-    def count_positions_by_type(self, position_type):
-        """Count number of positions of a given type"""
-        return sum(1 for pos in self.active_positions if pos['type'] == position_type)
-
-    def determine_trend(self, open_price, close_price, rsi, current_sma):
-        """Determine trend using price action, RSI, and SMA"""
+    def determine_trend(self, open_price, close_price, params):
+        """Enhanced trend determination using multiple indicators"""
         price_trend = "bullish" if close_price > open_price else "bearish"
         
-        # Consider RSI and SMA for trend confirmation
+        # Check SMA cross
+        sma_cross_bullish = params['short_sma'] > params['sma']
+        
+        # Enhanced trend confirmation
         if price_trend == "bullish":
-            if rsi < 70 and close_price > current_sma:  # Not overbought and above SMA
+            if (params['rsi'] < 70 and 
+                close_price > params['sma'] and 
+                sma_cross_bullish):
                 trend_strength = "confirmed"
             else:
                 trend_strength = "weak"
         else:
-            if rsi > 30 and close_price < current_sma:  # Not oversold and below SMA
+            if (params['rsi'] > 30 and 
+                close_price < params['sma'] and 
+                not sma_cross_bullish):
                 trend_strength = "confirmed"
             else:
                 trend_strength = "weak"
             
-        log(f"Trend calculation - Open: {open_price}, Close: {close_price}, RSI: {rsi}, SMA: {current_sma}")
+        log(f"Trend calculation - Open: {open_price}, Close: {close_price}, "
+            f"RSI: {params['rsi']}, SMA Cross Bullish: {sma_cross_bullish}")
         log(f"Trend: {price_trend}, Strength: {trend_strength}")
         
         return price_trend if trend_strength == "confirmed" else None
 
-    def manage_existing_positions(self, current_price, high_price, low_price):
-        """Check take profits and stop losses"""
-        positions_to_remove = []
-        allocation_change = 0
-        
-        for idx, pos in enumerate(self.active_positions):
-            # Check take profits
-            if pos['type'] == 'bullish' and high_price >= pos['take_profit']:
-                log(f"TP hit for bullish position {idx} at {pos['take_profit']}")
-                positions_to_remove.append(pos)
-                allocation_change -= pos['allocation']
-            elif pos['type'] == 'bearish' and low_price <= pos['take_profit']:
-                log(f"TP hit for bearish position {idx} at {pos['take_profit']}")
-                positions_to_remove.append(pos)
-                allocation_change -= pos['allocation']
-                
-            # Check stop losses
-            elif pos['type'] == 'bullish' and low_price <= pos['stop_loss']:
-                log(f"SL hit for bullish position {idx} at {pos['stop_loss']}")
-                positions_to_remove.append(pos)
-                allocation_change -= pos['allocation']
-            elif pos['type'] == 'bearish' and high_price >= pos['stop_loss']:
-                log(f"SL hit for bearish position {idx} at {pos['stop_loss']}")
-                positions_to_remove.append(pos)
-                allocation_change -= pos['allocation']
-        
-        for pos in positions_to_remove:
-            self.active_positions.remove(pos)
-        
-        return allocation_change
-
     def run(self, data):
         ohlcv = data.get("ohlcv")
+        required_periods = max(self.rsi_period, self.atr_period, self.vol_period, 
+                             self.sma_period, self.short_sma_period)
         
-        if not ohlcv or len(ohlcv) < max(self.rsi_period, self.atr_period, self.vol_period, self.sma_period):
+        if not ohlcv or len(ohlcv) < required_periods:
             log("Insufficient data")
             return TargetAllocation({self.tickers[0]: self.total_allocation})
 
@@ -200,11 +193,23 @@ class TradingStrategy(Strategy):
         )
         self.total_allocation += allocation_change
         
+        # Update total risk for closed positions
+        self.total_risk = sum(self.calculate_position_risk(pos['price'], pos['stop_loss'], pos['allocation'])
+                            for pos in self.active_positions)
+        
         # Determine trend
-        trend = self.determine_trend(ticker_data['open'], ticker_data['close'], 
-                                   params['rsi'], params['sma'])
+        trend = self.determine_trend(ticker_data['open'], ticker_data['close'], params)
         
         if trend and len(self.active_positions) < self.max_positions:
+            # Calculate potential position risk
+            potential_stop = (ticker_data['close'] - params['sl_distance'] if trend == "bullish"
+                            else ticker_data['close'] + params['sl_distance'])
+            position_risk = self.calculate_position_risk(ticker_data['close'], potential_stop, params['allocation'])
+            
+            # Check if we can add position
+            if not self.can_add_position(current_date, position_risk):
+                return TargetAllocation({self.tickers[0]: self.total_allocation})
+            
             # Check position limits per direction
             current_direction_positions = self.count_positions_by_type(trend)
             if current_direction_positions >= self.max_positions_per_direction:
@@ -225,17 +230,21 @@ class TradingStrategy(Strategy):
                     'price': ticker_data['close'],
                     'allocation': params['allocation'],
                     'type': trend,
-                    'take_profit': ticker_data['close'] + params['tp_distance'] if trend == "bullish" 
-                                 else ticker_data['close'] - params['tp_distance'],
-                    'stop_loss': ticker_data['close'] - params['sl_distance'] if trend == "bullish"
-                                else ticker_data['close'] + params['sl_distance']
+                    'take_profit': (ticker_data['close'] + params['tp_distance'] if trend == "bullish"
+                                  else ticker_data['close'] - params['tp_distance']),
+                    'stop_loss': potential_stop
                 }
                 
                 self.active_positions.append(position)
                 self.total_allocation += params['allocation']
+                self.total_risk += position_risk
+                self.daily_positions_opened += 1
                 log(f"New position opened: {position}")
         
         self.last_processed_date = current_date
-        log(f"Final total allocation: {self.total_allocation}\n")
+        log(f"Active positions: {len(self.active_positions)}")
+        log(f"Daily positions opened: {self.daily_positions_opened}")
+        log(f"Total risk: {self.total_risk*100:.2f}%")
+        log(f"Total allocation: {self.total_allocation}\n")
         
         return TargetAllocation({self.tickers[0]: self.total_allocation})

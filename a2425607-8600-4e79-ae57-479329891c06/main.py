@@ -4,7 +4,7 @@ from surmount.technical_indicators import RSI, ATR, SMA
 
 class TradingStrategy(Strategy):
     def __init__(self):
-        self.tickers = ["IAU"]
+        self.tickers = ["PPLT"]
         self.data_list = []
         
         # Strategy parameters

@@ -40,7 +40,7 @@ class TradingStrategy(Strategy):
         # Get technical indicators
         rsi = RSI(self.tickers[0], ohlcv, self.rsi_period)
         atr = ATR(self.tickers[0], ohlcv, self.atr_period)
-        vol_sma = SMA(self.tickers[0], ohlcv, self.vol_period, 'volume')
+        vol_sma = SMA(self.tickers[0], ohlcv, self.vol_period)
         
         if not all([rsi, atr, vol_sma]):
             return None

@@ -35,49 +35,70 @@ class TradingStrategy(Strategy):
     def data(self):
         return self.data_list
 
+    def calculate_average_volume(self, ohlcv, period):
+        """Calculate average volume manually"""
+        if len(ohlcv) < period:
+            return None
+        
+        volumes = []
+        for data in ohlcv[-period:]:
+            volumes.append(data[self.tickers[0]]['volume'])
+        
+        return sum(volumes) / len(volumes)
+
     def calculate_dynamic_parameters(self, ticker_data, ohlcv):
         """Calculate dynamic strategy parameters based on market conditions"""
-        # Get technical indicators
-        rsi = RSI(self.tickers[0], ohlcv, self.rsi_period)
-        atr = ATR(self.tickers[0], ohlcv, self.atr_period)
-        vol_sma = SMA(self.tickers[0], ohlcv, self.vol_period, 'volume')
-        
-        if not all([rsi, atr, vol_sma]):
+        try:
+            # Get technical indicators
+            rsi = RSI(self.tickers[0], ohlcv, self.rsi_period)
+            atr = ATR(self.tickers[0], ohlcv, self.atr_period)
+            avg_volume = self.calculate_average_volume(ohlcv, self.vol_period)
+            
+            if not all([rsi, atr, avg_volume]):
+                log("Technical indicators not ready")
+                return None
+                
+            current_rsi = rsi[-1]
+            current_atr = atr[-1]
+            
+            log(f"Indicators - RSI: {current_rsi}, ATR: {current_atr}, Avg Vol: {avg_volume}")
+            
+            # Dynamic grid spacing based on ATR
+            grid_step = current_atr * 0.5
+            
+            # Dynamic take profit based on RSI
+            if current_rsi > 70:
+                tp_distance = current_atr * 0.5  # Tighter TP in overbought
+            elif current_rsi < 30:
+                tp_distance = current_atr * 1.2  # Wider TP in oversold
+            else:
+                tp_distance = current_atr * 0.8
+                
+            # Dynamic stop loss based on ATR
+            sl_distance = current_atr * 3
+            
+            # Dynamic position sizing based on volume
+            if ticker_data['volume'] > avg_volume * 1.2:
+                allocation = self.base_allocation * 1.5
+            else:
+                allocation = self.base_allocation
+                
+            params = {
+                'grid_step': grid_step,
+                'tp_distance': tp_distance,
+                'sl_distance': sl_distance,
+                'allocation': allocation,
+                'rsi': current_rsi,
+                'atr': current_atr,
+                'avg_volume': avg_volume
+            }
+            
+            log(f"Dynamic Parameters: {params}")
+            return params
+            
+        except Exception as e:
+            log(f"Error calculating parameters: {str(e)}")
             return None
-            
-        current_rsi = rsi[-1]
-        current_atr = atr[-1]
-        avg_volume = vol_sma[-1]
-        
-        # Dynamic grid spacing based on ATR
-        grid_step = current_atr * 0.5
-        
-        # Dynamic take profit based on RSI
-        if current_rsi > 70:
-            tp_distance = current_atr * 0.5  # Tighter TP in overbought
-        elif current_rsi < 30:
-            tp_distance = current_atr * 1.2  # Wider TP in oversold
-        else:
-            tp_distance = current_atr * 0.8
-            
-        # Dynamic stop loss based on ATR
-        sl_distance = current_atr * 3
-        
-        # Dynamic position sizing based on volume
-        if ticker_data['volume'] > avg_volume * 1.2:
-            allocation = self.base_allocation * 1.5
-        else:
-            allocation = self.base_allocation
-            
-        return {
-            'grid_step': grid_step,
-            'tp_distance': tp_distance,
-            'sl_distance': sl_distance,
-            'allocation': allocation,
-            'rsi': current_rsi,
-            'atr': current_atr,
-            'avg_volume': avg_volume
-        }
 
     def determine_trend(self, open_price, close_price, rsi):
         """Determine trend using price action and RSI"""
@@ -148,8 +169,6 @@ class TradingStrategy(Strategy):
         params = self.calculate_dynamic_parameters(ticker_data, ohlcv)
         if not params:
             return TargetAllocation({self.tickers[0]: self.total_allocation})
-            
-        log(f"Dynamic Parameters: {params}")
         
         # Manage existing positions
         allocation_change = self.manage_existing_positions(

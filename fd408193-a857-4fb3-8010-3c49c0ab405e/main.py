@@ -1,7 +1,7 @@
 from surmount.base_class import Strategy, TargetAllocation
 from surmount.technical_indicators import RSI, SMA, ATR, MACD, BB
 from surmount.data import BroadUSDollarIndex, StLouisFinancialStressIndex
-from datetime import datetime, timedelta
+from datetime import datetime
 import pytz
 
 class GoldOvernightStrategy(Strategy):
@@ -11,8 +11,6 @@ class GoldOvernightStrategy(Strategy):
         
         # Risk management parameters
         self.base_position_size = 0.95  # 95% allocation when active
-        self.catastrophic_stop_pct = 0.05  # 5% catastrophic stop loss
-        self.morning_gap_threshold = 0.02  # 2% gap threshold
         
         # Technical analysis parameters
         self.atr_period = 14
@@ -24,13 +22,15 @@ class GoldOvernightStrategy(Strategy):
         # Market condition filters
         self.dollar_strength_threshold = 0.5
         
-        # Trading state
+        # Trading state tracking
+        self.last_close_price = None
         self.in_position = False
+        self.day_count = 0
 
     @property
     def interval(self):
         """Define the data interval needed"""
-        return "1day"  # Using daily data
+        return "1day"
 
     @property
     def assets(self):
@@ -54,7 +54,9 @@ class GoldOvernightStrategy(Strategy):
         
         # Get latest price data for GLD
         ohlcv_data = data["ohlcv"]
-        latest_close = ohlcv_data[-1]["GLD"]["close"]
+        current_day_data = ohlcv_data[-1]["GLD"]
+        latest_close = current_day_data["close"]
+        today_open = current_day_data["open"]
         
         # Calculate technical indicators
         atr_values = ATR("GLD", ohlcv_data, self.atr_period)
@@ -75,22 +77,24 @@ class GoldOvernightStrategy(Strategy):
             dollar_index = None
             financial_stress = None
         
-        # Decision making based on position state
-        # Since we can't use intraday data, we'll implement a modified overnight strategy
-        # We'll buy at the close of one day and sell at the open of the next day
+        # Increment day counter to track trading days
+        self.day_count += 1
         
-        # Get current date/time to determine if it's a new day
-        current_date = datetime.now().strftime("%Y-%m-%d")
-        
-        # Check if we have previous date in our data
-        if len(ohlcv_data) > 1:
-            previous_date = datetime.fromtimestamp(ohlcv_data[-2]["GLD"]["time"]).strftime("%Y-%m-%d")
-            new_day = current_date != previous_date
-        else:
-            new_day = True
+        # Exit logic - if we're in a position, sell at open
+        if self.in_position:
+            # Exit the position completely
+            allocation["GLD"] = 0
+            self.in_position = False
             
-        # Entry logic (buy at close)
-        if not self.in_position:
+            # Calculate P&L if we have a previous close price
+            if self.last_close_price is not None:
+                entry_price = self.last_close_price
+                exit_price = today_open
+                pnl_pct = (exit_price - entry_price) / entry_price
+                print(f"EXIT: Selling GLD at ${exit_price:.2f}, P&L: {pnl_pct:.2%}")
+        
+        # Entry logic - buy at close each day
+        else:
             # Apply position sizing based on market conditions
             position_size = self._calculate_position_size(
                 self.base_position_size,
@@ -108,20 +112,8 @@ class GoldOvernightStrategy(Strategy):
             if self._should_enter(latest_close, sma_short_values[-1], sma_long_values[-1], rsi_values[-1]):
                 allocation["GLD"] = position_size
                 self.in_position = True
+                self.last_close_price = latest_close
                 print(f"ENTRY: Buying GLD at ${latest_close:.2f}")
-        
-        # Exit logic (sell at open of next day)
-        elif self.in_position and new_day:
-            # Exit the position completely
-            allocation["GLD"] = 0
-            self.in_position = False
-            
-            # Calculate P&L if we have enough data
-            if len(ohlcv_data) > 1:
-                entry_price = ohlcv_data[-2]["GLD"]["close"]  # Previous day's close
-                exit_price = ohlcv_data[-1]["GLD"]["open"]    # Current day's open
-                pnl_pct = (exit_price - entry_price) / entry_price
-                print(f"EXIT: Selling GLD at ${exit_price:.2f}, P&L: {pnl_pct:.2%}")
         
         # Return the target allocation
         return TargetAllocation(allocation)
@@ -135,7 +127,7 @@ class GoldOvernightStrategy(Strategy):
         position_size = base_size
         
         # 1. Adjust for volatility
-        volatility_ratio = current_atr / avg_atr
+        volatility_ratio = current_atr / avg_atr if avg_atr > 0 else 1.0
         if volatility_ratio > 1.5:
             position_size *= 0.75  # Reduce by 25% for high volatility
         if volatility_ratio > 2.0:
